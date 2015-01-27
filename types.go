@@ -67,6 +67,14 @@ const (
 	typeVariant = 0x62
 )
 
+type udtInfo struct {
+	maxByteSize  uint16
+	dbName       string
+	owningSchema string
+	typeName     string
+	assemblyName string
+}
+
 // TYPE_INFO rule
 // http://msdn.microsoft.com/en-us/library/dd358284.aspx
 type typeInfo struct {
@@ -78,10 +86,12 @@ type typeInfo struct {
 	Collation collation
 	Reader    func(ti *typeInfo, r *tdsBuffer) (res interface{})
 	Writer    func(w io.Writer, ti typeInfo, buf []byte) (err error)
+	UdtInfo   *udtInfo
 }
 
 func readTypeInfo(r *tdsBuffer) (res typeInfo) {
 	res.TypeId = r.byte()
+	fmt.Printf("TypeId %x \n", res.TypeId)
 	switch res.TypeId {
 	case typeNull, typeInt1, typeBit, typeInt2, typeInt4, typeDateTim4,
 		typeFlt4, typeMoney, typeDateTime, typeFlt8, typeMoney4, typeInt8:
@@ -608,7 +618,7 @@ func readVarLen(ti *typeInfo, r *tdsBuffer) {
 		}
 		ti.Reader = readPLPType
 	case typeBigVarBin, typeBigVarChar, typeBigBinary, typeBigChar,
-		typeNVarChar, typeNChar, typeUdt:
+		typeNVarChar, typeNChar:
 		// short len types
 		ti.Size = int(r.uint16())
 		switch ti.TypeId {
@@ -621,6 +631,19 @@ func readVarLen(ti *typeInfo, r *tdsBuffer) {
 			ti.Buffer = make([]byte, ti.Size)
 			ti.Reader = readShortLenType
 		}
+	case typeUdt:
+		// Parse UDTInfo
+		// Reference: https://github.com/pekim/tedious/blob/master/src/metadata-parser.coffee#L84
+		ti.UdtInfo = &udtInfo{
+			maxByteSize:  r.uint16(),
+			dbName:       r.BVarChar(),
+			owningSchema: r.BVarChar(),
+			typeName:     r.BVarChar(),
+			assemblyName: r.UsVarChar(),
+		}
+		// Read as typeBigVarBin
+		// Reference: https://github.com/pekim/tedious/blob/master/src/value-parser.coffee#L212
+		ti.Reader = readPLPType
 	case typeText, typeImage, typeNText, typeVariant:
 		// LONGLEN_TYPE
 		ti.Size = int(r.int32())
@@ -779,8 +802,16 @@ func decodeXml(ti typeInfo, buf []byte) string {
 	return decodeUcs2(buf)
 }
 
-func decodeUdt(ti typeInfo, buf []byte) int {
-	panic("Not implemented")
+func decodeUdt(ti typeInfo, buf []byte) interface{} {
+	if ti.UdtInfo != nil {
+		switch ti.UdtInfo.typeName {
+		case "geography":
+			return decodeGeography(buf)
+		case "geometry":
+			return decodeGeometry(buf)
+		}
+	}
+	return buf
 }
 
 func makeDecl(ti typeInfo) string {
